@@ -1,0 +1,67 @@
+# 朝刊の時計。毎晩早めに起動して待ち、時刻ぴったりに非公開の朝刊リポジトリへ合図を出す。
+# GitHub の時刻指定は混雑で1〜3時間遅れることがあるため、早い時刻に何度も起動しておき、
+# 最初に動いた1回が待機する（公開リポジトリなので待機は無料）。2回目以降は記録を見て何もしない。
+name: clock
+
+on:
+  schedule:
+    - cron: "17 17 * * *" # 2:17（日本時間）
+    - cron: "17 18 * * *" # 3:17
+    - cron: "17 19 * * *" # 4:17
+    - cron: "17 20 * * *" # 5:17
+    - cron: "17 21 * * *" # 6:17
+  workflow_dispatch:
+
+concurrency:
+  group: clock
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Tokyo
+  GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+  TARGET: sintaro608742-crypto/morning-news
+  GENERATE_AT: "04:50"
+  SEND_AT: "06:55"
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: 今日の合図を出し終えていれば何もしない
+        run: |
+          if [ "$(cat last-send.txt 2>/dev/null)" = "$(date +%F)" ]; then echo "DONE=1" >> "$GITHUB_ENV"; fi
+
+      - name: 原稿づくりの合図
+        if: env.DONE != '1'
+        run: |
+          now=$(date +%s); gen=$(date -d "today $GENERATE_AT" +%s); send=$(date -d "today $SEND_AT" +%s)
+          # 送信の合図に間に合わないほど遅れた日は、送信側が足りない原稿を作るので省く
+          [ "$now" -ge "$send" ] && exit 0
+          [ "$now" -lt "$gen" ] && sleep $((gen - now))
+          gh workflow run morning-news.yml -R "$TARGET" -f mode=generate
+
+      - name: 送信の合図
+        if: env.DONE != '1'
+        run: |
+          now=$(date +%s); send=$(date -d "today $SEND_AT" +%s)
+          [ "$now" -lt "$send" ] && sleep $((send - now))
+          gh workflow run morning-news.yml -R "$TARGET" -f mode=send
+
+      # 記録は二重の合図を防ぐためと、リポジトリの更新が60日途絶えて時刻指定が止められるのを防ぐため
+      - name: 合図を出した日を記録する
+        if: env.DONE != '1'
+        run: |
+          date +%F > last-send.txt
+          git config user.name "morning-clock"
+          git config user.email "morning-clock@users.noreply.github.com"
+          git add last-send.txt
+          git commit -m "合図 $(date +%F)"
+          git push
