@@ -1,13 +1,18 @@
-# 朝刊の時計。毎晩早めに起動して待ち、時刻ぴったりに非公開の朝刊リポジトリへ合図を出す。
-# GitHub の時刻指定は混雑で1〜3時間遅れることがあるため、早い時刻に何度も起動しておき、
-# 最初に動いた1回が待機する（公開リポジトリなので待機は無料）。2回目以降は記録を見て何もしない。
+# 朝刊の時計。前の晩から起動して待ち、時刻ぴったりに非公開の朝刊リポジトリへ合図を出す。
+# GitHub の時刻指定は混雑で遅れたり、夜中の分がまるごと飛ばされたりする（10/20 は 2:17〜5:17 が全滅）。
+# そこで、前の晩の 19:17 から何度も起動しておき、最初に動いた1回が待機を引き継いでいく:
+#   1回の実行で待てるのは約5時間半まで。時刻に届かないときは、自分をもう一度起動してから終わる（つなぎ起動）。
+#   合図を出した日は記録する（last-generate.txt／last-send.txt）。2回目以降の起動は記録を見て何もしない。
+# 公開リポジトリなので待機は無料。
 name: clock
 
 on:
   schedule:
-    - cron: "17 17 * * *" # 2:17（日本時間）
+    - cron: "17 10 * * *" # 19:17（日本時間、前の晩）
+    - cron: "17 12 * * *" # 21:17
+    - cron: "17 14 * * *" # 23:17
+    - cron: "17 16 * * *" # 1:17
     - cron: "17 18 * * *" # 3:17
-    - cron: "17 19 * * *" # 4:17
     - cron: "17 20 * * *" # 5:17
     - cron: "17 21 * * *" # 6:17
   workflow_dispatch:
@@ -23,7 +28,7 @@ env:
   TZ: Asia/Tokyo
   GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
   TARGET: sintaro608742-crypto/morning-news
-  GENERATE_AT: "04:15"
+  GENERATE_AT: "03:30"
   SEND_AT: "06:55"
 
 jobs:
@@ -35,33 +40,39 @@ jobs:
         with:
           ref: main
 
-      - name: 今日の合図を出し終えていれば何もしない
+      - name: 待って合図を出す
         run: |
-          if [ "$(cat last-send.txt 2>/dev/null)" = "$(date +%F)" ]; then echo "DONE=1" >> "$GITHUB_ENV"; fi
+          deadline=$(( $(date +%s) + 320 * 60 ))
+          record() { # $1=ファイル $2=日付
+            git pull -q --rebase
+            echo "$2" > "$1"
+            git config user.name "morning-clock"
+            git config user.email "morning-clock@users.noreply.github.com"
+            git add "$1" && git commit -qm "合図 $1 $2" && git push -q
+          }
+          # 時刻 $1 まで待つ。この実行で待ちきれないときは、つなぎ起動して終わる
+          wait_until() {
+            if [ "$1" -gt "$deadline" ]; then
+              sleep $(( deadline - $(date +%s) ))
+              gh workflow run clock.yml -R "$GITHUB_REPOSITORY"
+              echo "待ちきれないため、つなぎ起動しました"; exit 0
+            fi
+            now=$(date +%s); [ "$now" -lt "$1" ] && sleep $(( $1 - now )); return 0
+          }
 
-      - name: 原稿づくりの合図
-        if: env.DONE != '1'
-        run: |
-          now=$(date +%s); gen=$(date -d "today $GENERATE_AT" +%s); send=$(date -d "today $SEND_AT" +%s)
-          # 送信の合図に間に合わないほど遅れた日は、送信側が足りない原稿を作るので省く
-          [ "$now" -ge "$send" ] && exit 0
-          [ "$now" -lt "$gen" ] && sleep $((gen - now))
-          gh workflow run morning-news.yml -R "$TARGET" -f mode=generate
+          # 次に届ける朝（D）: 今日の送信の合図がまだで、昼より前なら今日。それ以外は明日
+          today=$(date +%F)
+          if [ "$(cat last-send.txt 2>/dev/null)" != "$today" ] && [ "$(date +%H)" -lt 12 ]; then D=$today; else D=$(date -d tomorrow +%F); fi
+          if [ "$(cat last-send.txt 2>/dev/null)" = "$D" ]; then echo "$D の合図は出し終えています"; exit 0; fi
+          gen=$(date -d "$D $GENERATE_AT" +%s); send=$(date -d "$D $SEND_AT" +%s)
+          # 次の夕方の起動に任せる（昼間から一日じゅう待ち続けない）
+          if [ $(( gen - $(date +%s) )) -gt $(( 10 * 3600 )) ]; then echo "まだ早いので何もしない"; exit 0; fi
 
-      - name: 送信の合図
-        if: env.DONE != '1'
-        run: |
-          now=$(date +%s); send=$(date -d "today $SEND_AT" +%s)
-          [ "$now" -lt "$send" ] && sleep $((send - now))
+          if [ "$(cat last-generate.txt 2>/dev/null)" != "$D" ] && [ "$(date +%s)" -lt "$send" ]; then
+            wait_until "$gen"
+            gh workflow run morning-news.yml -R "$TARGET" -f mode=generate
+            record last-generate.txt "$D"
+          fi
+          wait_until "$send"
           gh workflow run morning-news.yml -R "$TARGET" -f mode=send
-
-      # 記録は二重の合図を防ぐためと、リポジトリの更新が60日途絶えて時刻指定が止められるのを防ぐため
-      - name: 合図を出した日を記録する
-        if: env.DONE != '1'
-        run: |
-          date +%F > last-send.txt
-          git config user.name "morning-clock"
-          git config user.email "morning-clock@users.noreply.github.com"
-          git add last-send.txt
-          git commit -m "合図 $(date +%F)"
-          git push
+          record last-send.txt "$D"
