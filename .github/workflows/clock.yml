@@ -23,7 +23,7 @@ env:
   TZ: Asia/Tokyo
   GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
   TARGET: sintaro608742-crypto/morning-news
-  GENERATE_AT: "04:50"
+  GENERATE_AT: "04:15"
   SEND_AT: "06:55"
 
 jobs:
